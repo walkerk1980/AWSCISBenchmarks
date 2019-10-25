@@ -1,0 +1,826 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "CIS AWS Foundations Benchmark - Section 3",
+    "Metadata": {
+        "AWS::CloudFormation::Interface": {
+            "ParameterGroups": [
+                {
+                    "Label": {
+                        "default": "CW Alarm Notifications"
+                    },
+                    "Parameters": [
+                        "CISBenchmarkNotificationEmail"
+                    ]
+                }
+            ],
+            "ParameterLabels": {
+                "CISBenchmarkNotificationEmail": {
+                    "default": "Email Address for Notifications from CIS Benchmark CW Alarms"
+                }
+            }
+        }
+    },
+    "Parameters": {
+        "CISBenchmarkNotificationEmail": {
+            "Type": "String",
+            "Description": "Email address that will be subscribed to the SNS topic for CloudWatch alarms, this email subscription must be manually confirmed.",
+            "AllowedPattern": "([a-zA-Z0-9_\\-\\.]+)@((\\[[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.)|(([a-zA-Z0-9\\-]+\\.)+))([a-zA-Z]{2,4}|[0-9]{1,3})(\\]?)",
+            "ConstraintDescription": "This must be a valid email address."
+        }
+    },
+    "Conditions": {
+        "GovCloudCondition": {
+            "Fn::Equals": [
+                {
+                    "Ref": "AWS::Region"
+                },
+                "us-gov-west-1"
+            ]
+        }
+    },
+    "Resources": {
+        "GetCloudWatchLogName": {
+            "Type": "AWS::Lambda::Function",
+            "DependsOn": [
+                "LambdaRole"
+            ],
+            "Properties": {
+                "FunctionName": "CIS-GetCloudTrailCloudWatchLog",
+                "Code": {
+                    "ZipFile": "import boto3\nimport cfnresponse\ndef lambda_handler(event, context):\n  cloudwatch_log = ''\n  response_data = {}\n  if event.get('RequestType') == 'Create':\n    for trail in boto3.client('cloudtrail').describe_trails(includeShadowTrails=False).get('trailList'):\n      if trail.get('CloudWatchLogsLogGroupArn'):\n        cloudwatch_log = trail.get('CloudWatchLogsLogGroupArn').split(':')[6]\n        break\n  response_data['LogName'] = cloudwatch_log\n  cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data, '')\n"
+                },
+                "Description": "Find the CloudWatch log name where CloudTrail sends it's logs",
+                "Handler": "index.lambda_handler",
+                "MemorySize": 128,
+                "Role": {
+                    "Fn::GetAtt": [
+                        "LambdaRole",
+                        "Arn"
+                    ]
+                },
+                "Runtime": "python3.7",
+                "Timeout": 5
+            }
+        },
+        "CloudWatchLogName": {
+            "Type": "Custom::CloudWatchLogName",
+            "DependsOn": "GetCloudWatchLogName",
+            "Properties": {
+                "ServiceToken": {
+                    "Fn::GetAtt": [
+                        "GetCloudWatchLogName",
+                        "Arn"
+                    ]
+                }
+            }
+        },
+        "LambdaRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": [
+                                    "lambda.amazonaws.com"
+                                ]
+                            },
+                            "Action": [
+                                "sts:AssumeRole"
+                            ]
+                        }
+                    ]
+                },
+                "ManagedPolicyArns": [
+                    {
+                        "Fn::Sub": [
+                            "arn:${Partition}:iam::aws:policy/AWSCloudTrailReadOnlyAccess",
+                            {
+                                "Partition": {
+                                    "Fn::If": [
+                                        "GovCloudCondition",
+                                        "aws-us-gov",
+                                        "aws"
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "Fn::Sub": [
+                            "arn:${Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+                            {
+                                "Partition": {
+                                    "Fn::If": [
+                                        "GovCloudCondition",
+                                        "aws-us-gov",
+                                        "aws"
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "Policies": [
+                ]
+            }
+        },
+        "FunctionToTestCloudWatchCloudTrailIntegration": {
+            "Type": "AWS::Lambda::Function",
+            "DependsOn": [
+                "LambdaRole"
+            ],
+            "Properties": {
+                "FunctionName": "CIS-TestCloudWatchCloudTrailIntegration",
+                "Code": {
+                    "ZipFile": "import boto3\nimport cfnresponse\ndef lambda_handler(event, context):\n  response_status = cfnresponse.SUCCESS\n  response_data = {}\n  if event.get('RequestType') == 'Create':\n    cloudwatch_integration = False\n    for trail in boto3.client('cloudtrail').describe_trails(includeShadowTrails=False).get('trailList'):\n      if trail.get('CloudWatchLogsLogGroupArn'):\n        cloudwatch_integration = True\n        break\n    if not cloudwatch_integration:\n      response_status = cfnresponse.FAILED\n      response_data['Reason']='No Trails found in this Region delivering to CloudWatch'\n      response_data['Status']='FAILED'\n  cfnresponse.send(event, context, response_status, response_data, '')\n"
+                },
+                "Description": "Evaluates whether CloudWatch is integrated with CloudTrail",
+                "Handler": "index.lambda_handler",
+                "MemorySize": 128,
+                "Role": {
+                    "Fn::GetAtt": [
+                        "LambdaRole",
+                        "Arn"
+                    ]
+                },
+                "Runtime": "python3.7",
+                "Timeout": 5
+            }
+        },
+        "TestCloudWatchCloudTrailIntegration": {
+            "Type": "Custom::TestCloudWatchCloudTrailIntegration",
+            "DependsOn": "FunctionToTestCloudWatchCloudTrailIntegration",
+            "Properties": {
+                "ServiceToken": {
+                    "Fn::GetAtt": [
+                        "FunctionToTestCloudWatchCloudTrailIntegration",
+                        "Arn"
+                    ]
+                }
+            }
+        },
+        "31UnauthorizedApiCallsAlarm": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "DependsOn": [
+                "CloudWatchLogName"
+            ],
+            "Properties": {
+                "AlarmName": "CIS-3.1_unauthorized_api_calls",
+                "AlarmDescription": "",
+                "MetricName": "CIS-3.1_unauthorized_api_calls",
+                "Namespace": "CISBenchmark",
+                "Statistic": "Sum",
+                "Period": 60,
+                "EvaluationPeriods": "1",
+                "Threshold": 1,
+                "TreatMissingData": "notBreaching",
+                "AlarmActions": [
+                    {
+                        "Ref": "AlarmNotificationTopic"
+                    }
+                ],
+                "ComparisonOperator": "GreaterThanOrEqualToThreshold"
+            }
+        },
+        "31UnauthorizedApiCallsFilter": {
+            "Type": "AWS::Logs::MetricFilter",
+            "DependsOn": [
+                "CloudWatchLogName"
+            ],
+            "Properties": {
+                "LogGroupName": {
+                    "Fn::GetAtt": [
+                        "CloudWatchLogName",
+                        "LogName"
+                    ]
+                },
+                "FilterPattern": "{($.errorCode = \"*UnauthorizedOperation\") || ($.errorCode = \"AccessDenied*\")}",
+                "MetricTransformations": [
+                    {
+                        "MetricValue": "1",
+                        "MetricNamespace": "CISBenchmark",
+                        "MetricName": "CIS-3.1_unauthorized_api_calls"
+                    }
+                ]
+            }
+        },
+        "32NoMfaConsoleSignInAlarm": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "DependsOn": [
+                "CloudWatchLogName",
+                "31UnauthorizedApiCallsAlarm"
+            ],
+            "Properties": {
+                "AlarmName": "CIS-3.2_no_mfa_console_signin",
+                "AlarmDescription": "",
+                "MetricName": "CIS-3.2_no_mfa_console_signin",
+                "Namespace": "CISBenchmark",
+                "Statistic": "Sum",
+                "Period": 60,
+                "EvaluationPeriods": 1,
+                "Threshold": 1,
+                "TreatMissingData": "notBreaching",
+                "AlarmActions": [
+                    {
+                        "Ref": "AlarmNotificationTopic"
+                    }
+                ],
+                "ComparisonOperator": "GreaterThanOrEqualToThreshold"
+            }
+        },
+        "32NoMfaConsoleSignInFilter": {
+            "Type": "AWS::Logs::MetricFilter",
+            "DependsOn": [
+                "CloudWatchLogName"
+            ],
+            "Properties": {
+                "LogGroupName": {
+                    "Fn::GetAtt": [
+                        "CloudWatchLogName",
+                        "LogName"
+                    ]
+                },
+                "FilterPattern": "{($.eventName = \"ConsoleLogin\") && ($.additionalEventData.MFAUsed != \"Yes\")}",
+                "MetricTransformations": [
+                    {
+                        "MetricValue": "1",
+                        "MetricNamespace": "CISBenchmark",
+                        "MetricName": "CIS-3.2_no_mfa_console_signin"
+                    }
+                ]
+            }
+        },
+        "33RootUsageAlarm": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "DependsOn": [
+                "CloudWatchLogName",
+                "32NoMfaConsoleSignInAlarm"
+            ],
+            "Properties": {
+                "AlarmName": "CIS-3.3_root_usage",
+                "AlarmDescription": "",
+                "MetricName": "CIS-3.3_root_usage",
+                "Namespace": "CISBenchmark",
+                "Statistic": "Sum",
+                "Period": 60,
+                "EvaluationPeriods": 1,
+                "Threshold": 1,
+                "TreatMissingData": "notBreaching",
+                "AlarmActions": [
+                    {
+                        "Ref": "AlarmNotificationTopic"
+                    }
+                ],
+                "ComparisonOperator": "GreaterThanOrEqualToThreshold"
+            }
+        },
+        "33RootUsageFilter": {
+            "Type": "AWS::Logs::MetricFilter",
+            "DependsOn": [
+                "CloudWatchLogName"
+            ],
+            "Properties": {
+                "LogGroupName": {
+                    "Fn::GetAtt": [
+                        "CloudWatchLogName",
+                        "LogName"
+                    ]
+                },
+                "FilterPattern": "{ $.userIdentity.type = \"Root\" && $.userIdentity.invokedBy NOT EXISTS && $.eventType != \"AwsServiceEvent\" }",
+                "MetricTransformations": [
+                    {
+                        "MetricValue": "1",
+                        "MetricNamespace": "CISBenchmark",
+                        "MetricName": "CIS-3.3_root_usage"
+                    }
+                ]
+            }
+        },
+        "34IAMChangesAlarm": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "DependsOn": [
+                "CloudWatchLogName",
+                "33RootUsageAlarm"
+            ],
+            "Properties": {
+                "AlarmName": "CIS-3.4_iam_changes",
+                "AlarmDescription": "",
+                "MetricName": "CIS-3.4_iam_changes",
+                "Namespace": "CISBenchmark",
+                "Statistic": "Sum",
+                "Period": "300",
+                "EvaluationPeriods": "1",
+                "Threshold": 1,
+                "TreatMissingData": "notBreaching",
+                "AlarmActions": [
+                    {
+                        "Ref": "AlarmNotificationTopic"
+                    }
+                ],
+                "ComparisonOperator": "GreaterThanOrEqualToThreshold"
+            }
+        },
+        "34IAMChangesFilter": {
+            "Type": "AWS::Logs::MetricFilter",
+            "DependsOn": [
+                "CloudWatchLogName"
+            ],
+            "Properties": {
+                "LogGroupName": {
+                    "Fn::GetAtt": [
+                        "CloudWatchLogName",
+                        "LogName"
+                    ]
+                },
+                "FilterPattern": "{($.eventName=DeleteGroupPolicy)||($.eventName=DeleteRolePolicy)||($.eventName=DeleteUserPolicy)||($.eventName=PutGroupPolicy)||($.eventName=PutRolePolicy)||($.eventName=PutUserPolicy)||($.eventName=CreatePolicy)||($.eventName=DeletePolicy)||($.eventName=CreatePolicyVersion)||($.eventName=DeletePolicyVersion)||($.eventName=AttachRolePolicy)||($.eventName=DetachRolePolicy)||($.eventName=AttachUserPolicy)||($.eventName=DetachUserPolicy)||($.eventName=AttachGroupPolicy)||($.eventName=DetachGroupPolicy)}",
+                "MetricTransformations": [
+                    {
+                        "MetricValue": "1",
+                        "MetricNamespace": "CISBenchmark",
+                        "MetricName": "CIS-3.4_iam_changes"
+                    }
+                ]
+            }
+        },
+        "35CloudTrailChangesAlarm": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "DependsOn": [
+                "CloudWatchLogName",
+                "34IAMChangesAlarm"
+            ],
+            "Properties": {
+                "AlarmName": "CIS-3.5cloudtrail_cfg_changes",
+                "AlarmDescription": "",
+                "MetricName": "CIS-3.5cloudtrail_cfg_changes",
+                "Namespace": "CISBenchmark",
+                "Statistic": "Sum",
+                "Period": "300",
+                "EvaluationPeriods": "1",
+                "Threshold": 1,
+                "TreatMissingData": "notBreaching",
+                "AlarmActions": [
+                    {
+                        "Ref": "AlarmNotificationTopic"
+                    }
+                ],
+                "ComparisonOperator": "GreaterThanOrEqualToThreshold"
+            }
+        },
+        "35CloudTrailChangesFilter": {
+            "Type": "AWS::Logs::MetricFilter",
+            "DependsOn": [
+                "CloudWatchLogName"
+            ],
+            "Properties": {
+                "LogGroupName": {
+                    "Fn::GetAtt": [
+                        "CloudWatchLogName",
+                        "LogName"
+                    ]
+                },
+                "FilterPattern": "{($.eventName = CreateTrail) || ($.eventName = UpdateTrail) || ($.eventName = DeleteTrail) || ($.eventName = StartLogging) || ($.eventName = StopLogging)}",
+                "MetricTransformations": [
+                    {
+                        "MetricValue": "1",
+                        "MetricNamespace": "CISBenchmark",
+                        "MetricName": "CIS-3.5cloudtrail_cfg_changes"
+                    }
+                ]
+            }
+        },
+        "36ConsoleSigninFailuresAlarm": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "DependsOn": [
+                "CloudWatchLogName",
+                "35CloudTrailChangesAlarm"
+            ],
+            "Properties": {
+                "AlarmName": "CIS-3.6_console_signin_failure",
+                "AlarmDescription": "",
+                "MetricName": "CIS-3.6_console_signin_failure",
+                "Namespace": "CISBenchmark",
+                "Statistic": "Sum",
+                "Period": "300",
+                "EvaluationPeriods": "1",
+                "Threshold": 1,
+                "TreatMissingData": "notBreaching",
+                "AlarmActions": [
+                    {
+                        "Ref": "AlarmNotificationTopic"
+                    }
+                ],
+                "ComparisonOperator": "GreaterThanOrEqualToThreshold"
+            }
+        },
+        "36ConsoleSigninFailuresFilter": {
+            "Type": "AWS::Logs::MetricFilter",
+            "DependsOn": [
+                "CloudWatchLogName"
+            ],
+            "Properties": {
+                "LogGroupName": {
+                    "Fn::GetAtt": [
+                        "CloudWatchLogName",
+                        "LogName"
+                    ]
+                },
+                "FilterPattern": "{($.eventName = ConsoleLogin) && ($.errorMessage = \"Failed authentication\") }",
+                "MetricTransformations": [
+                    {
+                        "MetricValue": "1",
+                        "MetricNamespace": "CISBenchmark",
+                        "MetricName": "CIS-3.6_console_signin_failure"
+                    }
+                ]
+            }
+        },
+        "37DisabledOrDeletedCmksAlarm": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "DependsOn": [
+                "CloudWatchLogName",
+                "36ConsoleSigninFailuresAlarm"
+            ],
+            "Properties": {
+                "AlarmName": "CIS-3.7_disable_or_delete_cmk_changes",
+                "AlarmDescription": "",
+                "MetricName": "CIS-3.7_disable_or_delete_cmk_changes",
+                "Namespace": "CISBenchmark",
+                "Statistic": "Sum",
+                "Period": 60,
+                "EvaluationPeriods": 1,
+                "Threshold": 1,
+                "TreatMissingData": "notBreaching",
+                "AlarmActions": [
+                    {
+                        "Ref": "AlarmNotificationTopic"
+                    }
+                ],
+                "ComparisonOperator": "GreaterThanOrEqualToThreshold"
+            }
+        },
+        "37DisabledOrDeletedCmksFilter": {
+            "Type": "AWS::Logs::MetricFilter",
+            "DependsOn": [
+                "CloudWatchLogName"
+            ],
+            "Properties": {
+                "LogGroupName": {
+                    "Fn::GetAtt": [
+                        "CloudWatchLogName",
+                        "LogName"
+                    ]
+                },
+                "FilterPattern": "{($.eventSource = kms.amazonaws.com) && (($.eventName=DisableKey)||($.eventName=ScheduleKeyDeletion))}",
+                "MetricTransformations": [
+                    {
+                        "MetricValue": "1",
+                        "MetricNamespace": "CISBenchmark",
+                        "MetricName": "CIS-3.7_disable_or_delete_cmk_changes"
+                    }
+                ]
+            }
+        },
+        "38BucketPolicyChangesAlarm": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "DependsOn": [
+                "CloudWatchLogName",
+                "37DisabledOrDeletedCmksAlarm"
+            ],
+            "Properties": {
+                "AlarmName": "CIS-3.8_s3_bucket_policy_changes",
+                "AlarmDescription": "",
+                "MetricName": "CIS-3.8_s3_bucket_policy_changes",
+                "Namespace": "CISBenchmark",
+                "Statistic": "Sum",
+                "Period": 60,
+                "EvaluationPeriods": 1,
+                "Threshold": 1,
+                "TreatMissingData": "notBreaching",
+                "AlarmActions": [
+                    {
+                        "Ref": "AlarmNotificationTopic"
+                    }
+                ],
+                "ComparisonOperator": "GreaterThanOrEqualToThreshold"
+            }
+        },
+        "38BucketPolicyChangesFilter": {
+            "Type": "AWS::Logs::MetricFilter",
+            "DependsOn": [
+                "CloudWatchLogName"
+            ],
+            "Properties": {
+                "LogGroupName": {
+                    "Fn::GetAtt": [
+                        "CloudWatchLogName",
+                        "LogName"
+                    ]
+                },
+                "FilterPattern": "{($.eventSource = s3.amazonaws.com) && (($.eventName = PutBucketAcl) || ($.eventName = PutBucketPolicy) || ($.eventName = PutBucketCors) || ($.eventName = PutBucketLifecycle) || ($.eventName = PutBucketReplication) || ($.eventName = DeleteBucketPolicy) || ($.eventName = DeleteBucketCors) || ($.eventName = DeleteBucketLifecycle) || ($.eventName = DeleteBucketReplication))}",
+                "MetricTransformations": [
+                    {
+                        "MetricValue": "1",
+                        "MetricNamespace": "CISBenchmark",
+                        "MetricName": "CIS-3.8_s3_bucket_policy_changes"
+                    }
+                ]
+            }
+        },
+        "39AWSConfigChangesAlarm": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "DependsOn": [
+                "CloudWatchLogName",
+                "38BucketPolicyChangesAlarm"
+            ],
+            "Properties": {
+                "AlarmName": "CIS-3.9_aws_config_changes",
+                "AlarmDescription": "",
+                "MetricName": "CIS-3.9_aws_config_changes",
+                "Namespace": "CISBenchmark",
+                "Statistic": "Sum",
+                "Period": 60,
+                "EvaluationPeriods": 1,
+                "Threshold": 1,
+                "TreatMissingData": "notBreaching",
+                "AlarmActions": [
+                    {
+                        "Ref": "AlarmNotificationTopic"
+                    }
+                ],
+                "ComparisonOperator": "GreaterThanOrEqualToThreshold"
+            }
+        },
+        "39AWSConfigChangesFilter": {
+            "Type": "AWS::Logs::MetricFilter",
+            "DependsOn": [
+                "CloudWatchLogName"
+            ],
+            "Properties": {
+                "LogGroupName": {
+                    "Fn::GetAtt": [
+                        "CloudWatchLogName",
+                        "LogName"
+                    ]
+                },
+                "FilterPattern": "{($.eventSource = config.amazonaws.com) && (($.eventName=StopConfigurationRecorder)||($.eventName=DeleteDeliveryChannel) ||($.eventName=PutDeliveryChannel)||($.eventName=PutConfigurationRecorder))}",
+                "MetricTransformations": [
+                    {
+                        "MetricValue": "1",
+                        "MetricNamespace": "CISBenchmark",
+                        "MetricName": "CIS-3.9_aws_config_changes"
+                    }
+                ]
+            }
+        },
+        "310SecurityGroupChangesAlarm": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "DependsOn": [
+                "CloudWatchLogName",
+                "39AWSConfigChangesAlarm"
+            ],
+            "Properties": {
+                "AlarmName": "CIS-3.10_security_group_changes",
+                "AlarmDescription": "",
+                "MetricName": "CIS-3.10_security_group_changes",
+                "Namespace": "CISBenchmark",
+                "Statistic": "Sum",
+                "Period": 60,
+                "EvaluationPeriods": 1,
+                "Threshold": 1,
+                "TreatMissingData": "notBreaching",
+                "AlarmActions": [
+                    {
+                        "Ref": "AlarmNotificationTopic"
+                    }
+                ],
+                "ComparisonOperator": "GreaterThanOrEqualToThreshold"
+            }
+        },
+        "310SecurityGroupChangesFilter": {
+            "Type": "AWS::Logs::MetricFilter",
+            "DependsOn": [
+                "CloudWatchLogName"
+            ],
+            "Properties": {
+                "LogGroupName": {
+                    "Fn::GetAtt": [
+                        "CloudWatchLogName",
+                        "LogName"
+                    ]
+                },
+                "FilterPattern": "{($.eventName = AuthorizeSecurityGroupIngress) || ($.eventName = AuthorizeSecurityGroupEgress) || ($.eventName = RevokeSecurityGroupIngress) || ($.eventName = RevokeSecurityGroupEgress) || ($.eventName = CreateSecurityGroup) || ($.eventName = DeleteSecurityGroup)}",
+                "MetricTransformations": [
+                    {
+                        "MetricValue": "1",
+                        "MetricNamespace": "CISBenchmark",
+                        "MetricName": "CIS-3.10_security_group_changes"
+                    }
+                ]
+            }
+        },
+        "311NACLChangesAlarm": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "DependsOn": [
+                "CloudWatchLogName",
+                "310SecurityGroupChangesAlarm"
+            ],
+            "Properties": {
+                "AlarmName": "CIS-3.11_nacl_changes",
+                "AlarmDescription": "",
+                "MetricName": "CIS-3.11_nacl_changes",
+                "Namespace": "CISBenchmark",
+                "Statistic": "Sum",
+                "Period": 60,
+                "EvaluationPeriods": 1,
+                "Threshold": 1,
+                "TreatMissingData": "notBreaching",
+                "AlarmActions": [
+                    {
+                        "Ref": "AlarmNotificationTopic"
+                    }
+                ],
+                "ComparisonOperator": "GreaterThanOrEqualToThreshold"
+            }
+        },
+        "311NACLChangesFilter": {
+            "Type": "AWS::Logs::MetricFilter",
+            "DependsOn": [
+                "CloudWatchLogName"
+            ],
+            "Properties": {
+                "LogGroupName": {
+                    "Fn::GetAtt": [
+                        "CloudWatchLogName",
+                        "LogName"
+                    ]
+                },
+                "FilterPattern": "{($.eventName = CreateNetworkAcl) || ($.eventName = CreateNetworkAclEntry) || ($.eventName = DeleteNetworkAcl) || ($.eventName = DeleteNetworkAclEntry) || ($.eventName = ReplaceNetworkAclEntry) || ($.eventName = ReplaceNetworkAclAssociation)}",
+                "MetricTransformations": [
+                    {
+                        "MetricValue": "1",
+                        "MetricNamespace": "CISBenchmark",
+                        "MetricName": "CIS-3.11_nacl_changes"
+                    }
+                ]
+            }
+        },
+        "312NetworkGWChangesAlarm": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "DependsOn": [
+                "CloudWatchLogName",
+                "311NACLChangesAlarm"
+            ],
+            "Properties": {
+                "AlarmName": "CIS-3.12_network_gw_changes",
+                "AlarmDescription": "",
+                "MetricName": "CIS-3.12_network_gw_changes",
+                "Namespace": "CISBenchmark",
+                "Statistic": "Sum",
+                "Period": 60,
+                "EvaluationPeriods": 1,
+                "Threshold": 1,
+                "TreatMissingData": "notBreaching",
+                "AlarmActions": [
+                    {
+                        "Ref": "AlarmNotificationTopic"
+                    }
+                ],
+                "ComparisonOperator": "GreaterThanOrEqualToThreshold"
+            }
+        },
+        "312NetworkGWChangesFilter": {
+            "Type": "AWS::Logs::MetricFilter",
+            "DependsOn": [
+                "CloudWatchLogName"
+            ],
+            "Properties": {
+                "LogGroupName": {
+                    "Fn::GetAtt": [
+                        "CloudWatchLogName",
+                        "LogName"
+                    ]
+                },
+                "FilterPattern": "{($.eventName = CreateCustomerGateway) || ($.eventName = DeleteCustomerGateway) || ($.eventName = AttachInternetGateway) || ($.eventName = CreateInternetGateway) || ($.eventName = DeleteInternetGateway) || ($.eventName = DetachInternetGateway)}",
+                "MetricTransformations": [
+                    {
+                        "MetricValue": "1",
+                        "MetricNamespace": "CISBenchmark",
+                        "MetricName": "CIS-3.12_network_gw_changes"
+                    }
+                ]
+            }
+        },
+        "313RouteTableChangesAlarm": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "DependsOn": [
+                "CloudWatchLogName",
+                "312NetworkGWChangesAlarm"
+            ],
+            "Properties": {
+                "AlarmName": "CIS-3.13_route_table_changes",
+                "AlarmDescription": "",
+                "MetricName": "CIS-3.13_route_table_changes",
+                "Namespace": "CISBenchmark",
+                "Statistic": "Sum",
+                "Period": 60,
+                "EvaluationPeriods": 1,
+                "Threshold": 1,
+                "TreatMissingData": "notBreaching",
+                "AlarmActions": [
+                    {
+                        "Ref": "AlarmNotificationTopic"
+                    }
+                ],
+                "ComparisonOperator": "GreaterThanOrEqualToThreshold"
+            }
+        },
+        "313RouteTableChangesFilter": {
+            "Type": "AWS::Logs::MetricFilter",
+            "DependsOn": [
+                "CloudWatchLogName"
+            ],
+            "Properties": {
+                "LogGroupName": {
+                    "Fn::GetAtt": [
+                        "CloudWatchLogName",
+                        "LogName"
+                    ]
+                },
+                "FilterPattern": "{($.eventName = CreateRoute) || ($.eventName = CreateRouteTable) || ($.eventName = ReplaceRoute) || ($.eventName = ReplaceRouteTableAssociation) || ($.eventName = DeleteRouteTable) || ($.eventName = DeleteRoute) || ($.eventName = DisassociateRouteTable)}",
+                "MetricTransformations": [
+                    {
+                        "MetricValue": "1",
+                        "MetricNamespace": "CISBenchmark",
+                        "MetricName": "CIS-3.13_route_table_changes"
+                    }
+                ]
+            }
+        },
+        "314VPCChangesAlarm": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "DependsOn": [
+                "CloudWatchLogName",
+                "313RouteTableChangesAlarm"
+            ],
+            "Properties": {
+                "AlarmName": "CIS-3.14_vpc_changes",
+                "AlarmDescription": "",
+                "MetricName": "CIS-3.14_vpc_changes",
+                "Namespace": "CISBenchmark",
+                "Statistic": "Sum",
+                "Period": 60,
+                "EvaluationPeriods": 1,
+                "Threshold": 1,
+                "TreatMissingData": "notBreaching",
+                "AlarmActions": [
+                    {
+                        "Ref": "AlarmNotificationTopic"
+                    }
+                ],
+                "ComparisonOperator": "GreaterThanOrEqualToThreshold"
+            }
+        },
+        "314VPCChangesFilter": {
+            "Type": "AWS::Logs::MetricFilter",
+            "DependsOn": [
+                "CloudWatchLogName"
+            ],
+            "Properties": {
+                "LogGroupName": {
+                    "Fn::GetAtt": [
+                        "CloudWatchLogName",
+                        "LogName"
+                    ]
+                },
+                "FilterPattern": "{($.eventName = CreateVpc) || ($.eventName = DeleteVpc) || ($.eventName = ModifyVpcAttribute) || ($.eventName = AcceptVpcPeeringConnection) || ($.eventName = CreateVpcPeeringConnection) || ($.eventName = DeleteVpcPeeringConnection) || ($.eventName = RejectVpcPeeringConnection) || ($.eventName = AttachClassicLinkVpc) || ($.eventName = DetachClassicLinkVpc) || ($.eventName = DisableVpcClassicLink) || ($.eventName = EnableVpcClassicLink)}",
+                "MetricTransformations": [
+                    {
+                        "MetricValue": "1",
+                        "MetricNamespace": "CISBenchmark",
+                        "MetricName": "CIS-3.14_vpc_changes"
+                    }
+                ]
+            }
+        },
+        "AlarmNotificationTopic": {
+            "Type": "AWS::SNS::Topic",
+            "DependsOn": [
+                "CloudWatchLogName"
+            ],
+            "Properties": {
+                "TopicName": "CIS-NotificationTopic",
+                "Subscription": [
+                    {
+                        "Endpoint": {
+                            "Ref": "CISBenchmarkNotificationEmail"
+                        },
+                        "Protocol": "email"
+                    }
+                ]
+            }
+        }
+    }
+}
